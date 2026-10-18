@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Map Picker</title>
+<style>
+body{font-family:system-ui,sans-serif;margin:16px;background:#fafafa;color:#222}
+#bar{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
+label{cursor:pointer}
+button{padding:4px 10px;cursor:pointer}
+#grid{display:grid;gap:1px;width:max-content;font:9px monospace;user-select:none}
+.h{font-size:11px;color:#888;display:flex;align-items:center;justify-content:center}
+.c{width:32px;height:32px;display:flex;align-items:center;justify-content:center;text-align:center;line-height:1.1}
+.w{background:#222;cursor:not-allowed}
+.p{background:#d5ecd4;cursor:pointer}
+.p:hover{outline:2px solid #378ADD}
+.r{background:#85B7EB!important;color:#042C53}
+#grid.lm .c{background:#fff!important;color:transparent!important}
+.s{background:#2e7d32!important;color:#fff}
+.g{background:#c62828!important;color:#fff}
+.v{background:#0C447C!important;color:#fff}
+#out{width:100%;max-width:640px;height:320px;font:13px monospace;margin-top:12px}
+#visits{margin:8px 0;font-size:13px}
+.chip{display:inline-block;background:#e3eefa;border-radius:10px;padding:2px 8px;margin:2px}
+.chip b{cursor:pointer;color:#c62828;margin-left:4px}
+details{margin-top:12px}
+textarea.m{font:12px monospace;width:260px;height:200px}
+</style>
+</head>
+<body>
+<div id="bar">
+  <strong>Click mode:</strong>
+  <label><input type="radio" name="mode" value="start" checked> Start</label>
+  <label><input type="radio" name="mode" value="visit"> Add visit</label>
+  <label><input type="radio" name="mode" value="goal"> Goal</label>
+  <button id="undo">Undo last visit</button>
+  <button id="clear">Clear visits</button>
+  <button id="gen" style="background:#378ADD;color:#fff;border:0;border-radius:4px;font-weight:600">Generate path</button>
+  <label><input type="checkbox" id="useGoal"> end at goal</label>
+  <strong style="margin-left:8px">View:</strong>
+  <label><input type="radio" name="view" value="hl"> Highlight</label>
+  <label><input type="radio" name="view" value="line"> Grid + arrows</label>
+  <label><input type="radio" name="view" value="map" checked> Map as lines</label>
+</div>
+<div id="visits"></div>
+<div id="info" style="font-size:13px;margin:6px 0;color:#444"></div>
+<div style="position:relative;width:max-content"><div id="grid"></div><svg id="ov" style="position:absolute;left:0;top:0;pointer-events:none"></svg></div>
+<textarea id="dirs" readonly placeholder="Directions appear here after Generate path (U = toward row 0, D = toward last row, L/R = column -/+)" style="width:100%;max-width:640px;height:150px;font:13px monospace;margin-top:12px"></textarea>
+<div style="margin-top:12px;font-size:13px"><b>C code</b> — paste yours here to load the start, goal and food points onto the map (or use the map to generate it):</div>
+<textarea id="out" spellcheck="false" placeholder="#define MAP_START_ROW 14&#10;#define MAP_START_COL 7&#10;...&#10;static const uint8_t food_list[FOOD_COUNT][2] = { {14,5}, ... };" style="margin-top:4px"></textarea><br>
+<button id="copy">Copy C code</button>
+<details>
+  <summary>Edit map (rows of 1/0, 1 = path)</summary>
+  <textarea class="m" id="map"></textarea><br>
+  <button id="apply">Apply map</button>
+</details>
+<script>
+var DEFAULT_MAP=["1111100011111111111","1000100010010001001","1111111010011011111","1010101111011110001","1111100001001010000","0100101111111111111","0111100010000100000","0101011111111111111","1101001000100000010","1001101111000000011","1111001010011111110","0101111010110100011","0101101110100000001","1111011011111111111","0001110110010001010"];
+var rows=DEFAULT_MAP.slice();
+var start=[14,7],goal=[0,0],visits=[[14,5],[13,0],[11,1],[7,3],[10,3],[13,0],[11,4],[14,5],[14,17]];
+var route=null;
+var $=function(i){return document.getElementById(i)};
+function astar(a,b){
+  var R=rows.length,C=rows[0].length,key=function(p){return p[0]*C+p[1]};
+  var h=function(p){return Math.abs(p[0]-b[0])+Math.abs(p[1]-b[1])};
+  var open=[a],g={},came={},closed={};
+  g[key(a)]=0;came[key(a)]=null;
+  while(open.length){
+    var bi=0;
+    for(var i=1;i<open.length;i++){
+      var fi=g[key(open[i])]+h(open[i]),fb=g[key(open[bi])]+h(open[bi]);
+      if(fi<fb||(fi===fb&&h(open[i])<h(open[bi])))bi=i;
+    }
+    var cur=open.splice(bi,1)[0],ck=key(cur);
+    if(same(cur,b)){
+      var path=[],k=ck;
+      while(k!==null){path.push([Math.floor(k/C),k%C]);k=came[k];}
+      return path.reverse();
+    }
+    closed[ck]=true;
+    [[1,0],[-1,0],[0,1],[0,-1]].forEach(function(d){
+      var n=[cur[0]+d[0],cur[1]+d[1]];
+      if(n[0]<0||n[0]>=R||n[1]<0||n[1]>=C||rows[n[0]][n[1]]!=='1')return;
+      var nk=key(n);if(closed[nk])return;
+      var ng=g[ck]+1;
+      if(g[nk]===undefined||ng<g[nk]){
+        g[nk]=ng;came[nk]=ck;
+        if(!open.some(function(o){return same(o,n)}))open.push(n);
+      }
+    });
+  }
+  return null;
+}
+function generate(){
+  var pts=[start].concat(visits);
+  if($('useGoal').checked)pts.push(goal);
+  if(pts.length<2){$('info').textContent='Add at least one visit point.';return;}
+  var set={},total=0,legs=[],legsCells=[];
+  for(var i=0;i<pts.length-1;i++){
+    var seg=astar(pts[i],pts[i+1]);
+    if(!seg){route=null;render();$('info').innerHTML='<b style="color:#c62828">No path</b> from {'+pts[i]+'} to {'+pts[i+1]+'} (leg '+(i+1)+').';return;}
+    total+=seg.length-1;legs.push(seg.length-1);
+    legsCells.push(seg);
+    seg.forEach(function(p){set[p[0]+','+p[1]]=true;});
+  }
+  route={set:set,legs:legsCells};render();
+  $('dirs').value=dirText(legsCells);
+  $('info').innerHTML='<b>Total: '+total+' steps</b> (A*, 4-directional, points visited in listed order). Legs: '+legs.join(', ');
+}
+function mode(){return document.querySelector('input[name=mode]:checked').value}
+function same(a,b){return a[0]===b[0]&&a[1]===b[1]}
+function parseC(text){
+  var t=text.replace(/\/\*[\s\S]*?\*\//g,'').replace(/\/\/.*$/gm,'');
+  var num=function(name){
+    var x=t.match(new RegExp('#define\\s+'+name+'\\s+\\(?\\s*(\\d+)'));
+    return x?+x[1]:null;
+  };
+  var res={start:null,goal:null,food:null,count:num('FOOD_COUNT')};
+  var sr=num('MAP_START_ROW'),sc=num('MAP_START_COL'),gr=num('MAP_GOAL_ROW'),gc=num('MAP_GOAL_COL');
+  if(sr!==null&&sc!==null)res.start=[sr,sc];
+  if(gr!==null&&gc!==null)res.goal=[gr,gc];
+  var m=t.match(/food_list\s*\[[^\]]*\]\s*\[[^\]]*\]\s*=\s*\{([\s\S]*?)\}\s*;/);
+  if(m){
+    res.food=[];
+    var re=/\{\s*(\d+)\s*,\s*(\d+)\s*\}/g,x;
+    while((x=re.exec(m[1])))res.food.push([+x[1],+x[2]]);
+  }
+  return res;
+}
+function render(skipOut){
+  var R=rows.length,C=rows[0].length,g=$('grid');
+  g.style.gridTemplateColumns='28px repeat('+C+',32px)';
+  g.className=view()==='map'?'lm':'';
+  var h='<div></div>';
+  for(var c=0;c<C;c++)h+='<div class="h">'+c+'</div>';
+  for(var r=0;r<R;r++){
+    h+='<div class="h">'+r+'</div>';
+    for(var c=0;c<C;c++){
+      var cls=rows[r][c]==='1'?'p':'w',lab=r+','+c,cell=[r,c],tags=[];
+      if(same(cell,start))tags.push('S');
+      if(same(cell,goal))tags.push('G');
+      visits.forEach(function(v,i){if(same(v,cell))tags.push(i+1)});
+      if(tags.length){
+        if(tags.indexOf('S')>=0)cls+=' s';
+        if(tags.indexOf('G')>=0)cls+=' g';
+        if(tags.some(function(t){return typeof t==='number'}))cls+=' v';
+        lab=tags.join('/')+'<br>'+lab;
+      } else if(route&&view()==='hl'&&route.set[r+','+c])cls+=' r';
+      h+='<div class="c '+cls+'" data-r="'+r+'" data-c="'+c+'" title="'+r+','+c+'">'+lab+'</div>';
+    }
+  }
+  g.innerHTML=h;
+  $('visits').innerHTML='<b>Visits ('+visits.length+'):</b> '+(visits.map(function(v,i){return '<span class="chip">'+(i+1)+': {'+v+'}<b data-i="'+i+'">×</b></span>'}).join('')||'none');
+  var code='#define MAP_START_ROW '+start[0]+'\n#define MAP_START_COL '+start[1]+'\n#define MAP_GOAL_ROW '+goal[0]+'\n#define MAP_GOAL_COL '+goal[1]+'\n\n#define FOOD_COUNT '+visits.length+'\n\nstatic const uint8_t food_list[FOOD_COUNT][2] = {\n'+visits.map(function(v){return '    {'+v[0]+','+v[1]+'},'}).join('\n')+'\n};\n';
+  if(!skipOut)$('out').value=code;
+  if(!route)$('dirs').value='';
+  drawOverlay();
+}
+function view(){return document.querySelector('input[name=view]:checked').value}
+function drawOverlay(){
+  var svg=$('ov'),g=$('grid'),gr=g.getBoundingClientRect();
+  svg.innerHTML='';
+  svg.setAttribute('width',gr.width);svg.setAttribute('height',gr.height);
+  if(view()==='hl'||(!route&&view()!=='map'))return;
+  var ctr=function(p){
+    var el=g.querySelector('[data-r="'+p[0]+'"][data-c="'+p[1]+'"]'),b=el.getBoundingClientRect();
+    return [b.left-gr.left+b.width/2,b.top-gr.top+b.height/2];
+  };
+  var out='';
+  if(view()==='map'){
+    var R=rows.length,C=rows[0].length,isP=function(r,c){return r<R&&c<C&&rows[r][c]==='1'};
+    for(var r=0;r<R;r++)for(var c=0;c<C;c++){
+      if(!isP(r,c))continue;
+      var a=ctr([r,c]);
+      if(isP(r,c+1)){var b=ctr([r,c+1]);out+='<line x1="'+a[0]+'" y1="'+a[1]+'" x2="'+b[0]+'" y2="'+b[1]+'" stroke="#9aa5b1" stroke-width="2.5" stroke-linecap="round"/>';}
+      if(isP(r+1,c)){var b2=ctr([r+1,c]);out+='<line x1="'+a[0]+'" y1="'+a[1]+'" x2="'+b2[0]+'" y2="'+b2[1]+'" stroke="#9aa5b1" stroke-width="2.5" stroke-linecap="round"/>';}
+      out+='<circle cx="'+a[0]+'" cy="'+a[1]+'" r="2.5" fill="#9aa5b1"/>';
+    }
+  }
+  (route?route.legs:[]).forEach(function(seg,li){
+    if(seg.length<2)return;
+    var col='hsl('+((li*47+210)%360)+',75%,38%)',o=(li%3-1)*3;
+    var pts=seg.map(function(p){var c=ctr(p);return [c[0]+o,c[1]+o]});
+    out+='<polyline points="'+pts.map(function(q){return q[0]+','+q[1]}).join(' ')+'" fill="none" stroke="'+col+'" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round" opacity="0.9"/>';
+    for(var i=1;i<pts.length;i++){
+      var a=pts[i-1],b=pts[i],mx=(a[0]+b[0])/2,my=(a[1]+b[1])/2,ang=Math.atan2(b[1]-a[1],b[0]-a[0])*180/Math.PI;
+      out+='<polygon points="-4.5,-4 4.5,0 -4.5,4" fill="'+col+'" stroke="#fff" stroke-width="0.8" transform="translate('+mx+','+my+') rotate('+ang+')"/>';
+    }
+  });
+  var tg={};
+  var addTag=function(p,t){var k=p[0]+','+p[1];(tg[k]=tg[k]||{p:p,t:[]}).t.push(t)};
+  addTag(start,'S');
+  if(view()==='map'){
+    visits.forEach(function(v,i){addTag(v,String(i+1))});
+    addTag(goal,'G');
+  }
+  Object.keys(tg).forEach(function(k){
+    var o=tg[k],c=ctr(o.p),t=o.t,col=t[0]==='S'?'#2e7d32':t[0]==='G'?'#c62828':'#0C447C';
+    if(view()==='map')out+='<circle cx="'+c[0]+'" cy="'+c[1]+'" r="11" fill="'+col+'" stroke="#fff" stroke-width="1.5"/><text x="'+c[0]+'" y="'+c[1]+'" dy="3" text-anchor="middle" font-size="8" font-weight="700" fill="#fff" font-family="monospace">'+t.join('/')+'</text>';
+    else out+='<circle cx="'+c[0]+'" cy="'+c[1]+'" r="5" fill="#2e7d32" stroke="#fff" stroke-width="1.5"/>';
+  });
+  svg.innerHTML=out;
+}
+function dirText(legs){
+  var all='',lines=[];
+  legs.forEach(function(seg,li){
+    var s='';
+    for(var i=1;i<seg.length;i++){
+      var dr=seg[i][0]-seg[i-1][0],dc=seg[i][1]-seg[i-1][1];
+      s+=dr<0?'U':dr>0?'D':dc>0?'R':'L';
+    }
+    all+=s;
+    var rle=s.replace(/(.)\1*/g,function(m){return m[0]+m.length});
+    lines.push('Leg '+(li+1)+' {'+seg[0]+'} -> {'+seg[seg.length-1]+'}: '+(rle||'(already there)'));
+  });
+  return lines.join('\n')+'\n\nFull sequence ('+all.length+' moves):\n'+all;
+}
+$('grid').addEventListener('click',function(e){
+  var t=e.target.closest('.c');if(!t||!t.classList.contains('p'))return;
+  var cell=[+t.dataset.r,+t.dataset.c],m=mode();
+  if(m==='start')start=cell;else if(m==='goal')goal=cell;else visits.push(cell);
+  route=null;$('info').textContent='';render();
+});
+$('visits').addEventListener('click',function(e){
+  if(e.target.dataset.i!==undefined){visits.splice(+e.target.dataset.i,1);route=null;$('info').textContent='';render();}
+});
+$('undo').onclick=function(){visits.pop();route=null;$('info').textContent='';render()};
+$('clear').onclick=function(){visits=[];route=null;$('info').textContent='';render()};
+$('gen').onclick=generate;
+$('out').addEventListener('input',function(){
+  var p=parseC(this.value),bad=[],R=rows.length,C=rows[0].length;
+  var chk=function(q,label){
+    if(q[0]<0||q[0]>=R||q[1]<0||q[1]>=C){bad.push(label+' {'+q+'} is outside the map');return false}
+    if(rows[q[0]][q[1]]!=='1')bad.push(label+' {'+q+'} is on a wall');
+    return true;
+  };
+  if(!p.start&&!p.goal&&!p.food){route=null;$('info').textContent='Nothing recognised yet: need MAP_START_ROW/COL, MAP_GOAL_ROW/COL or a food_list.';return;}
+  if(p.start&&chk(p.start,'Start'))start=p.start;
+  if(p.goal&&chk(p.goal,'Goal'))goal=p.goal;
+  if(p.food)visits=p.food.filter(function(q,i){return chk(q,'Food '+(i+1))});
+  if(p.food&&p.count!==null&&p.count!==p.food.length)bad.push('FOOD_COUNT is '+p.count+' but food_list has '+p.food.length+' entries');
+  route=null;
+  render(true);
+  $('info').innerHTML='Loaded from C code: start {'+start+'}, goal {'+goal+'}, '+visits.length+' food points.'+(bad.length?'<br><b style="color:#c62828">'+bad.join('<br>')+'</b>':'');
+});
+document.querySelectorAll('input[name=view]').forEach(function(r){r.onchange=render});
+$('useGoal').onchange=function(){route=null;$('info').textContent='';render()};
+$('copy').onclick=function(){$('out').select();navigator.clipboard?navigator.clipboard.writeText($('out').value):document.execCommand('copy');this.textContent='Copied!';var b=this;setTimeout(function(){b.textContent='Copy C code'},1200)};
+$('map').value=rows.join('\n');
+$('apply').onclick=function(){
+  var r=$('map').value.split('\n').map(function(s){return s.trim()}).filter(Boolean);
+  if(!r.length||r.some(function(s){return s.length!==r[0].length||/[^01]/.test(s)})){alert('Rows must be equal-length strings of 0/1');return}
+  rows=r;route=null;$('info').textContent='';render();
+};
+render();
+</script>
+</body>
+</html>
